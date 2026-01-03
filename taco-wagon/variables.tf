@@ -4,6 +4,11 @@ variable "additional_buckets" {
   default     = []
 }
 
+variable "app_password_version" {
+  description = "Version of the application password secret"
+  type        = number
+}
+
 variable "application_settings" {
   description = "Application configuration settings"
   type = object({
