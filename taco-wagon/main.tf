@@ -9,10 +9,34 @@ data "aws_availability_zones" "available" {
 
 # Local values for common tags
 locals {
+  env = {
+    PRODUCTION  = "production"
+    STAGING     = "staging"
+    DEVELOPMENT = "development"
+  }
   common_tags = {
     Environment = var.environment
     ManagedBy   = var.team
+    Owner       = coalesce(var.owner, var.team)
   }
+  name_prefix = lower("${var.team}-${var.environment}")
+
+  ingress_rules = [
+    {
+      from_port   = var.environment == local.env.PRODUCTION ? 8080 : 80
+      to_port     = var.environment == local.env.PRODUCTION ? 8080 : 80
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    },
+    {
+      from_port   = var.environment == local.env.PRODUCTION ? 8443 : 443
+      to_port     = var.environment == local.env.PRODUCTION ? 8443 : 443
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  ]
+
+  buckets = toset(concat(["logs", "app-data", "backups"], var.additional_buckets))
 }
 
 resource "aws_vpc" "main" {
@@ -20,40 +44,31 @@ resource "aws_vpc" "main" {
   enable_dns_hostnames = true
   enable_dns_support   = true
 
-  tags = local.common_tags
+  tags = merge(local.common_tags, {
+    Name = format("%s-vpc", local.name_prefix)
+  })
 }
 
-resource "aws_subnet" "public_1" {
-  vpc_id = aws_vpc.main.id
-  cidr_block = var.public_subnet_cidrs[0]
-  availability_zone = data.aws_availability_zones.available.names[0]
+
+#NETWORKING
+resource "aws_subnet" "public" {
+  count      = var.public_subnet_count
+  vpc_id     = aws_vpc.main.id
+  cidr_block = cidrsubnet(var.vpc_cidr, 8, count.index)
+  availability_zone = data.aws_availability_zones.available.names[
+  count.index % length(data.aws_availability_zones.available.names)]
   map_public_ip_on_launch = true
 
-  tags = local.common_tags
-}
-
-resource "aws_subnet" "public_2" {
-  vpc_id = aws_vpc.main.id
-  cidr_block = var.public_subnet_cidrs[1]
-  availability_zone = data.aws_availability_zones.available.names[1]
-  map_public_ip_on_launch = true
-
-  tags = local.common_tags
-}
-
-resource "aws_subnet" "public_3" {
-  vpc_id = aws_vpc.main.id
-  cidr_block = var.public_subnet_cidrs[2]
-  availability_zone = data.aws_availability_zones.available.names[2]
-  map_public_ip_on_launch = true
-
-  tags = local.common_tags
+  tags = merge(local.common_tags, {
+    Name = format("%s-public-%d", local.name_prefix, count.index + 1)
+  })
 }
 
 resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
-  tags = local.common_tags
-  
+  tags = merge(local.common_tags, {
+    Name = format("%s-igw", local.name_prefix)
+  })
 }
 
 resource "aws_route_table" "public" {
@@ -63,20 +78,35 @@ resource "aws_route_table" "public" {
     gateway_id = aws_internet_gateway.main.id
   }
 
+  tags = merge(local.common_tags, {
+    Name = format("%s-public-rt", local.name_prefix)
+  })
+}
+
+resource "aws_route_table_association" "public" {
+  count          = var.public_subnet_count
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+
+
+# BUCKETS
+resource "aws_s3_bucket" "web" {
+  for_each = local.buckets
+
+  bucket_prefix = format("%s-%s-", local.name_prefix, each.value)
+  force_destroy = true
+
   tags = local.common_tags
 }
 
-resource "aws_route_table_association" "public_1" {
-  subnet_id      = aws_subnet.public_1.id
-  route_table_id = aws_route_table.public.id
-}
+resource "aws_s3_bucket_public_access_block" "web" {
+  for_each = local.buckets
+  bucket   = aws_s3_bucket.web[each.key].id
 
-resource "aws_route_table_association" "public_2" {
-  subnet_id      = aws_subnet.public_2.id
-  route_table_id = aws_route_table.public.id
-}
-
-resource "aws_route_table_association" "public_3" {
-  subnet_id      = aws_subnet.public_3.id
-  route_table_id = aws_route_table.public.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
